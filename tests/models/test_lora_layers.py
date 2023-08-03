@@ -737,7 +737,6 @@ class LoraIntegrationTests(unittest.TestCase):
         ).images
 
         images = images[0, -3:, -3:, -1].flatten()
-
         expected = np.array([0.3636, 0.3708, 0.3694, 0.3679, 0.3829, 0.3677, 0.3692, 0.3688, 0.3292])
 
         self.assertTrue(np.allclose(images, expected, atol=1e-4))
@@ -761,7 +760,7 @@ class LoraIntegrationTests(unittest.TestCase):
 
         self.assertTrue(np.allclose(images, expected, atol=1e-4))
 
-    def test_unload_lora(self):
+    def test_unload_kohya_lora(self):
         generator = torch.manual_seed(0)
         prompt = "masterpiece, best quality, mountain"
         num_inference_steps = 2
