@@ -561,6 +561,12 @@ class StableDiffusionControlNetPipeline(
         else:
             assert False
 
+        if not isinstance(control_guidance_start, (tuple, list)):
+            control_guidance_start = [control_guidance_start]
+
+        if not isinstance(control_guidance_end, (tuple, list)):
+            control_guidance_end = [control_guidance_end]
+
         if len(control_guidance_start) != len(control_guidance_end):
             raise ValueError(
                 f"`control_guidance_start` has {len(control_guidance_start)} elements, but `control_guidance_end` has {len(control_guidance_end)} elements. Make sure to provide the same number of elements to each list."
@@ -941,23 +947,10 @@ class StableDiffusionControlNetPipeline(
                 if isinstance(controlnet_keep[i], list):
                     cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
                 else:
-                    # Hack - Start
-                    """
-                    Amending because it fails regardless you pass the parameter as float of List[float]:
-                    images = pipe(
-                        image=[canny_image, openpose_image, hde_image],
-                        # This fails (because the parameter `controlnet_conditioning_scale` gets casted to List[float])
-                        controlnet_conditioning_scale=1.0,
-                        # This fails as well, but the current logic does not seem to be able to handle this case anyway?
-                        controlnet_conditioning_scale=[0.7, 0.9, 1.0],
-                        # This amendment let you pass in this way (or [0.7]) and it does not get error at least
-                        # Though "0.7" is applied to all the 3 ControlNets
-                        controlnet_conditioning_scale=0.7,
-                    ).images
-                    """
-                    cond_scale = [controlnet_conditioning_scale[0] * controlnet_keep[i]]
-                    # cond_scale = controlnet_conditioning_scale * controlnet_keep[i]
-                    # Hack - End
+                    controlnet_cond_scale = controlnet_conditioning_scale
+                    if isinstance(controlnet_cond_scale, list):
+                        controlnet_cond_scale = controlnet_cond_scale[0]
+                    cond_scale = controlnet_cond_scale * controlnet_keep[i]
 
                 down_block_res_samples, mid_block_res_sample = self.controlnet(
                     control_model_input,
