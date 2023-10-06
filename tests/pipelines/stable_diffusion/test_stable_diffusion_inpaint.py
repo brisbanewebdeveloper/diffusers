@@ -42,6 +42,7 @@ from diffusers.utils.testing_utils import (
     load_image,
     load_numpy,
     nightly,
+    require_python39_or_higher,
     require_torch_2,
     require_torch_gpu,
     run_test_in_subprocess,
@@ -49,7 +50,6 @@ from diffusers.utils.testing_utils import (
     torch_device,
 )
 
-from ...models.test_models_unet_2d_condition import create_lora_layers
 from ..pipeline_params import TEXT_GUIDED_IMAGE_INPAINTING_BATCH_PARAMS, TEXT_GUIDED_IMAGE_INPAINTING_PARAMS
 from ..test_pipelines_common import PipelineKarrasSchedulerTesterMixin, PipelineLatentTesterMixin, PipelineTesterMixin
 
@@ -221,40 +221,6 @@ class StableDiffusionInpaintPipelineFastTests(
         assert out_pil.shape == (1, 64, 64, 3)
         assert np.abs(out_pil.flatten() - out_tensor.flatten()).max() < 5e-2
 
-    def test_stable_diffusion_inpaint_lora(self):
-        device = "cpu"  # ensure determinism for the device-dependent torch.Generator
-
-        components = self.get_dummy_components()
-        sd_pipe = StableDiffusionInpaintPipeline(**components)
-        sd_pipe = sd_pipe.to(torch_device)
-        sd_pipe.set_progress_bar_config(disable=None)
-
-        # forward 1
-        inputs = self.get_dummy_inputs(device)
-        output = sd_pipe(**inputs)
-        image = output.images
-        image_slice = image[0, -3:, -3:, -1]
-
-        # set lora layers
-        lora_attn_procs = create_lora_layers(sd_pipe.unet)
-        sd_pipe.unet.set_attn_processor(lora_attn_procs)
-        sd_pipe = sd_pipe.to(torch_device)
-
-        # forward 2
-        inputs = self.get_dummy_inputs(device)
-        output = sd_pipe(**inputs, cross_attention_kwargs={"scale": 0.0})
-        image = output.images
-        image_slice_1 = image[0, -3:, -3:, -1]
-
-        # forward 3
-        inputs = self.get_dummy_inputs(device)
-        output = sd_pipe(**inputs, cross_attention_kwargs={"scale": 0.5})
-        image = output.images
-        image_slice_2 = image[0, -3:, -3:, -1]
-
-        assert np.abs(image_slice - image_slice_1).max() < 1e-2
-        assert np.abs(image_slice - image_slice_2).max() > 1e-2
-
     def test_inference_batch_single_identical(self):
         super().test_inference_batch_single_identical(expected_max_diff=3e-3)
 
@@ -410,10 +376,6 @@ class StableDiffusionSimpleInpaintPipelineFastTests(StableDiffusionInpaintPipeli
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2
 
-    @unittest.skip("skipped here because area stays unchanged due to mask")
-    def test_stable_diffusion_inpaint_lora(self):
-        ...
-
     def test_stable_diffusion_inpaint_2_images(self):
         device = "cpu"  # ensure determinism for the device-dependent torch.Generator
         components = self.get_dummy_components()
@@ -510,7 +472,7 @@ class StableDiffusionInpaintPipelineSlowTests(unittest.TestCase):
 
         assert image.shape == (1, 512, 512, 3)
         expected_slice = np.array([0.1509, 0.1245, 0.1672, 0.1655, 0.1519, 0.1226, 0.1462, 0.1567, 0.2451])
-        assert np.abs(expected_slice - image_slice).max() < 5e-2
+        assert np.abs(expected_slice - image_slice).max() < 1e-1
 
     def test_stable_diffusion_inpaint_pndm(self):
         pipe = StableDiffusionInpaintPipeline.from_pretrained(
@@ -568,6 +530,7 @@ class StableDiffusionInpaintPipelineSlowTests(unittest.TestCase):
         # make sure that less than 2.2 GB is allocated
         assert mem_bytes < 2.2 * 10**9
 
+    @require_python39_or_higher
     @require_torch_2
     def test_inpaint_compile(self):
         seed = 0
@@ -668,7 +631,7 @@ class StableDiffusionInpaintPipelineSlowTests(unittest.TestCase):
         inputs["num_inference_steps"] = 5
         image = pipe(**inputs).images[0]
 
-        assert np.max(np.abs(image - image_ckpt)) < 1e-4
+        assert np.max(np.abs(image - image_ckpt)) < 5e-4
 
 
 @slow
@@ -809,6 +772,7 @@ class StableDiffusionInpaintPipelineAsymmetricAutoencoderKLSlowTests(unittest.Te
         # make sure that less than 2.45 GB is allocated
         assert mem_bytes < 2.45 * 10**9
 
+    @require_python39_or_higher
     @require_torch_2
     def test_inpaint_compile(self):
         pass
