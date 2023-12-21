@@ -112,7 +112,7 @@ def save_model_card(
     repo_folder=None,
     vae_path=None,
 ):
-    img_str = "widget:\n" if images else ""
+    img_str = "widget:\n"
     for i, image in enumerate(images):
         image.save(os.path.join(repo_folder, f"image_{i}.png"))
         img_str += f"""
@@ -120,6 +120,10 @@ def save_model_card(
           output:
             url:
                 "image_{i}.png"
+        """
+    if not images:
+        img_str += f"""
+        - text: '{instance_prompt}'
         """
 
     trigger_str = f"You should use {instance_prompt} to trigger the image generation."
@@ -133,10 +137,10 @@ def save_model_card(
         diffusers_imports_pivotal = """from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
         """
-        diffusers_example_pivotal = f"""embedding_path = hf_hub_download(repo_id="{repo_id}", filename="embeddings.safetensors", repo_type="model")
+        diffusers_example_pivotal = f"""embedding_path = hf_hub_download(repo_id='{repo_id}', filename="embeddings.safetensors", repo_type="model")
 state_dict = load_file(embedding_path)
-pipeline.load_textual_inversion(state_dict["clip_l"], token=["<s0>", "<s1>"], text_encoder=pipe.text_encoder, tokenizer=pipe.tokenizer)
-pipeline.load_textual_inversion(state_dict["clip_g"], token=["<s0>", "<s1>"], text_encoder=pipe.text_encoder_2, tokenizer=pipe.tokenizer_2)
+pipeline.load_textual_inversion(state_dict["clip_l"], token=["<s0>", "<s1>"], text_encoder=pipeline.text_encoder, tokenizer=pipeline.tokenizer)
+pipeline.load_textual_inversion(state_dict["clip_g"], token=["<s0>", "<s1>"], text_encoder=pipeline.text_encoder_2, tokenizer=pipeline.tokenizer_2)
         """
         if token_abstraction_dict:
             for key, value in token_abstraction_dict.items():
@@ -145,8 +149,7 @@ pipeline.load_textual_inversion(state_dict["clip_g"], token=["<s0>", "<s1>"], te
 to trigger concept `{key}` → use `{tokens}` in your prompt \n
 """
 
-    yaml = f"""
----
+    yaml = f"""---
 tags:
 - stable-diffusion-xl
 - stable-diffusion-xl-diffusers
@@ -159,7 +162,7 @@ base_model: {base_model}
 instance_prompt: {instance_prompt}
 license: openrail++
 ---
-    """
+"""
 
     model_card = f"""
 # SDXL LoRA DreamBooth - {repo_id}
@@ -169,14 +172,6 @@ license: openrail++
 ## Model description
 
 ### These are {repo_id} LoRA adaption weights for {base_model}.
-
-The weights were trained  using [DreamBooth](https://dreambooth.github.io/).
-
-LoRA for the text encoder was enabled: {train_text_encoder}.
-
-Pivotal tuning was enabled: {train_text_encoder_ti}.
-
-Special VAE used for training: {vae_path}.
 
 ## Trigger words
 
@@ -196,11 +191,24 @@ image = pipeline('{validation_prompt if validation_prompt else instance_prompt}'
 
 For more details, including weighting, merging and fusing LoRAs, check the [documentation on loading LoRAs in diffusers](https://huggingface.co/docs/diffusers/main/en/using-diffusers/loading_adapters)
 
-## Download model (use it with UIs such as AUTO1111, Comfy, SD.Next, Invoke)
+## Download model
 
-Weights for this model are available in Safetensors format.
+### Use it with UIs such as AUTOMATIC1111, Comfy UI, SD.Next, Invoke
 
-[Download]({repo_id}/tree/main) them in the Files & versions tab.
+- Download the LoRA *.safetensors [here](/{repo_id}/blob/main/pytorch_lora_weights.safetensors). Rename it and place it on your Lora folder.
+- Download the text embeddings *.safetensors [here](/{repo_id}/blob/main/embeddings.safetensors). Rename it and place it on it on your embeddings folder.
+
+All [Files & versions](/{repo_id}/tree/main).
+
+## Details
+
+The weights were trained using [🧨 diffusers Advanced Dreambooth Training Script](https://github.com/huggingface/diffusers/blob/main/examples/advanced_diffusion_training/train_dreambooth_lora_sdxl_advanced.py).
+
+LoRA for the text encoder was enabled. {train_text_encoder}.
+
+Pivotal tuning was enabled: {train_text_encoder_ti}.
+
+Special VAE used for training: {vae_path}.
 
 """
     with open(os.path.join(repo_folder, "README.md"), "w") as f:
@@ -666,6 +674,12 @@ def parse_args(input_args=None):
         type=int,
         default=4,
         help=("The dimension of the LoRA update matrices."),
+    )
+    parser.add_argument(
+        "--cache_latents",
+        action="store_true",
+        default=False,
+        help="Cache the VAE latents",
     )
 
     if input_args is not None:
@@ -1170,6 +1184,7 @@ def main(args):
         revision=args.revision,
         variant=args.variant,
     )
+    vae_scaling_factor = vae.config.scaling_factor
     unet = UNet2DConditionModel.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="unet", revision=args.revision, variant=args.variant
     )
@@ -1600,6 +1615,20 @@ def main(args):
             args.validation_prompt = args.validation_prompt.replace(token_abs, "".join(token_replacement))
     print("validation prompt:", args.validation_prompt)
 
+    if args.cache_latents:
+        latents_cache = []
+        for batch in tqdm(train_dataloader, desc="Caching latents"):
+            with torch.no_grad():
+                batch["pixel_values"] = batch["pixel_values"].to(
+                    accelerator.device, non_blocking=True, dtype=torch.float32
+                )
+                latents_cache.append(vae.encode(batch["pixel_values"]).latent_dist)
+
+        if args.validation_prompt is None:
+            del vae
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -1715,9 +1744,7 @@ def main(args):
         unet.train()
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(unet):
-                pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
                 prompts = batch["prompts"]
-                # print(prompts)
                 # encode batch prompts when custom prompts are provided for each image -
                 if train_dataset.custom_instance_prompts:
                     if freeze_text_encoder:
@@ -1729,9 +1756,13 @@ def main(args):
                         tokens_one = tokenize_prompt(tokenizer_one, prompts, add_special_tokens)
                         tokens_two = tokenize_prompt(tokenizer_two, prompts, add_special_tokens)
 
-                # Convert images to latent space
-                model_input = vae.encode(pixel_values).latent_dist.sample()
-                model_input = model_input * vae.config.scaling_factor
+                if args.cache_latents:
+                    model_input = latents_cache[step].sample()
+                else:
+                    pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
+                    model_input = vae.encode(pixel_values).latent_dist.sample()
+
+                model_input = model_input * vae_scaling_factor
                 if args.pretrained_vae_model_name_or_path is None:
                     model_input = model_input.to(weight_dtype)
 
@@ -1981,43 +2012,42 @@ def main(args):
             text_encoder_lora_layers=text_encoder_lora_layers,
             text_encoder_2_lora_layers=text_encoder_2_lora_layers,
         )
-
-        # Final inference
-        # Load previous pipeline
-        vae = AutoencoderKL.from_pretrained(
-            vae_path,
-            subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
-        pipeline = StableDiffusionXLPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            vae=vae,
-            revision=args.revision,
-            variant=args.variant,
-            torch_dtype=weight_dtype,
-        )
-
-        # We train on the simplified learning objective. If we were previously predicting a variance, we need the scheduler to ignore it
-        scheduler_args = {}
-
-        if "variance_type" in pipeline.scheduler.config:
-            variance_type = pipeline.scheduler.config.variance_type
-
-            if variance_type in ["learned", "learned_range"]:
-                variance_type = "fixed_small"
-
-            scheduler_args["variance_type"] = variance_type
-
-        pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config, **scheduler_args)
-
-        # load attention processors
-        pipeline.load_lora_weights(args.output_dir)
-
-        # run inference
         images = []
         if args.validation_prompt and args.num_validation_images > 0:
+            # Final inference
+            # Load previous pipeline
+            vae = AutoencoderKL.from_pretrained(
+                vae_path,
+                subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
+                revision=args.revision,
+                variant=args.variant,
+                torch_dtype=weight_dtype,
+            )
+            pipeline = StableDiffusionXLPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                vae=vae,
+                revision=args.revision,
+                variant=args.variant,
+                torch_dtype=weight_dtype,
+            )
+
+            # We train on the simplified learning objective. If we were previously predicting a variance, we need the scheduler to ignore it
+            scheduler_args = {}
+
+            if "variance_type" in pipeline.scheduler.config:
+                variance_type = pipeline.scheduler.config.variance_type
+
+                if variance_type in ["learned", "learned_range"]:
+                    variance_type = "fixed_small"
+
+                scheduler_args["variance_type"] = variance_type
+
+            pipeline.scheduler = DPMSolverMultistepScheduler.from_config(pipeline.scheduler.config, **scheduler_args)
+
+            # load attention processors
+            pipeline.load_lora_weights(args.output_dir)
+
+            # run inference
             pipeline = pipeline.to(accelerator.device)
             generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
             images = [
